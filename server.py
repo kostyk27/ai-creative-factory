@@ -16,7 +16,8 @@ from pathlib import Path
 import requests
 from flask import Flask, request, jsonify, send_from_directory
 from openai import OpenAI
-import replicate
+
+os.environ["REPLICATE_API_TOKEN"] = os.environ.get("REPLICATE_API_TOKEN", "")
 
 # Загружаем .env только локально (на хостинге ключи задаются через переменные окружения)
 try:
@@ -254,6 +255,7 @@ def _get_replicate_token():
 
 def _generate_one_image(prompt):
     """Generate one image via Replicate flux-2-pro; return (image_bytes, extension)."""
+    import replicate
     camera_variations = [
         "close-up shot",
         "wide cinematic shot",
