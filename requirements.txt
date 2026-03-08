@@ -1,6 +1,7 @@
-flask
-gunicorn
-openai
-replicate
-requests
-python-dotenv
+flask==3.0.3
+gunicorn==21.2.0
+openai==1.30.5
+replicate==0.25.1
+python-dotenv==1.0.1
+requests==2.31.0
+pillow==10.3.0
