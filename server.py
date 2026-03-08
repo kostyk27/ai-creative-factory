@@ -9,9 +9,7 @@ import json
 import os
 import random
 import re
-import threading
 import time
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -30,10 +28,6 @@ except ImportError:
 
 app = Flask(__name__, static_folder="static")
 ROOT = Path(__file__).resolve().parent
-
-# In-memory job store for async image generation (avoids 502 timeout)
-_generation_jobs = {}
-_jobs_lock = threading.Lock()
 STATIC_DIR = ROOT / "static"
 IMAGES_DIR = STATIC_DIR / "images"
 BANNERS_DIR = STATIC_DIR / "banners"
@@ -259,31 +253,36 @@ def _get_replicate_token():
     return REPLICATE_API_TOKEN or os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
 
-def _generate_one_image(prompt, seed=None):
+def _generate_one_image(prompt):
     import requests
     token = os.environ.get("REPLICATE_API_TOKEN")
-    if not token:
-        raise ValueError("REPLICATE_API_TOKEN is not set")
 
     headers = {
         "Authorization": f"Token {token}",
         "Content-Type": "application/json"
     }
 
-    # Subject first (Flux best practice), then style/context
-    enhanced_prompt = f"""{prompt}, professional advertising photography, commercial product shoot, high detail, cinematic lighting, hyper realistic, sharp focus, high-end marketing creative, social media advertisement, photorealistic"""
+    enhanced_prompt = f"""
+{prompt},
 
-    if seed is None:
-        seed = (int(time.time() * 1000) + random.randint(0, 99999)) % 2147483647
+professional advertising photography,
+commercial product shoot,
+high detail,
+cinematic lighting,
+hyper realistic,
+sharp focus,
+high-end marketing creative,
+social media advertisement,
+photorealistic
+"""
 
     data = {
-        "version": "black-forest-labs/flux-2-pro",
+        "version": "black-forest-labs/flux-1.1-pro",
         "input": {
             "prompt": enhanced_prompt,
             "aspect_ratio": "1:1",
-            "seed": seed,
-            "output_format": "webp",
-            "output_quality": 90
+            "num_outputs": 4,
+            "guidance": 3
         }
     }
 
@@ -293,32 +292,21 @@ def _generate_one_image(prompt, seed=None):
         headers=headers,
         timeout=60
     )
+
     resp.raise_for_status()
     prediction = resp.json()
+
     get_url = prediction["urls"]["get"]
 
     while True:
-        result = requests.get(get_url, headers=headers, timeout=30).json()
+        result = requests.get(get_url, headers=headers).json()
         if result["status"] == "succeeded":
             output = result["output"]
             image_url = output[0] if isinstance(output, list) else output
-            img = requests.get(image_url, timeout=60).content
-            return img, "webp"
+            img = requests.get(image_url).content
+            return img, "png"
         elif result["status"] == "failed":
-            raise ValueError(result.get("error") or "Replicate generation failed")
-        time.sleep(1.5)
-
-
-def _generate_images(prompt, count=4):
-    """Generate count images. Sequential to avoid Replicate concurrency limits (1 prediction at a time per token)."""
-    if count <= 0:
-        return []
-    images = []
-    for i in range(count):
-        seed = (int(time.time() * 1000) + i * 100003 + random.randint(0, 9999)) % 2147483647
-        img, ext = _generate_one_image(prompt, seed=seed)
-        images.append((img, ext))
-    return images
+            raise ValueError("Replicate generation failed")
 
 
 @app.route("/")
@@ -369,31 +357,6 @@ def generate_prompts():
     return jsonify({"prompts": scored})
 
 
-def _run_generation_job(job_id, prompt, count):
-    """Background task: generate images and save; update job status."""
-    with _jobs_lock:
-        _generation_jobs[job_id]["status"] = "processing"
-    try:
-        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-        date_folder = datetime.now().strftime("%Y-%m-%d")
-        out_dir = IMAGES_DIR / date_folder
-        out_dir.mkdir(parents=True, exist_ok=True)
-        base_ts = int(time.time())
-        images = _generate_images(prompt, count=count)
-        paths = []
-        for i, (content, ext) in enumerate(images, start=1):
-            name = f"img_{base_ts}_{i}.{ext}"
-            (out_dir / name).write_bytes(content)
-            paths.append(f"/images/{date_folder}/{name}")
-        with _jobs_lock:
-            _generation_jobs[job_id]["status"] = "completed"
-            _generation_jobs[job_id]["images"] = paths
-    except Exception as e:
-        with _jobs_lock:
-            _generation_jobs[job_id]["status"] = "failed"
-            _generation_jobs[job_id]["error"] = str(e)
-
-
 @app.route("/generate-images", methods=["POST"])
 def generate_images():
     token = _get_replicate_token()
@@ -410,26 +373,23 @@ def generate_images():
     if not prompt:
         return jsonify({"error": "prompt is required"}), 400
 
-    job_id = str(uuid.uuid4())
-    with _jobs_lock:
-        _generation_jobs[job_id] = {"status": "processing", "images": [], "error": None}
-    thread = threading.Thread(target=_run_generation_job, args=(job_id, prompt, count))
-    thread.daemon = True
-    thread.start()
-    return jsonify({"job_id": job_id, "status": "processing"}), 202
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    date_folder = datetime.now().strftime("%Y-%m-%d")
+    out_dir = IMAGES_DIR / date_folder
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    base_ts = int(time.time())
 
+    for i in range(count):
+        try:
+            content, ext = _generate_one_image(prompt)
+        except Exception as e:
+            return jsonify({"error": str(e), "images": paths}), 500
+        name = f"img_{base_ts}_{i + 1}.{ext}"
+        (out_dir / name).write_bytes(content)
+        paths.append(f"/images/{date_folder}/{name}")
 
-@app.route("/generate-images/result/<job_id>", methods=["GET"])
-def generate_images_result(job_id):
-    with _jobs_lock:
-        job = _generation_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    return jsonify({
-        "status": job["status"],
-        "images": job.get("images", []),
-        "error": job.get("error")
-    })
+    return jsonify({"images": paths})
 
 
 @app.route("/images/<path:filename>")
