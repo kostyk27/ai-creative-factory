@@ -38,7 +38,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
 OPENAI_CHAT_MODEL = "gpt-4o-mini"
-REPLICATE_MODEL = "black-forest-labs/flux-2-pro"
+REPLICATE_MODEL = "black-forest-labs/flux-1.1-pro"
 
 IMAGE_QUALITY_SUFFIX = (
     "ultra realistic, cinematic lighting, professional advertising photography, "
