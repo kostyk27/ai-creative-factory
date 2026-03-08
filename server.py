@@ -10,7 +10,6 @@ import os
 import random
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -305,18 +304,14 @@ def _generate_one_image(prompt, seed=None):
 
 
 def _generate_images(prompt, count=4):
-    """Generate count images in parallel (simultaneously)."""
-    def one(i):
-        seed = (int(time.time() * 1000) + i * 100003 + random.randint(0, 9999)) % 2147483647
-        return _generate_one_image(prompt, seed=seed)
-
+    """Generate count images. Sequential to avoid Replicate concurrency limits (1 prediction at a time per token)."""
     if count <= 0:
         return []
     images = []
-    with ThreadPoolExecutor(max_workers=min(count, 4)) as executor:
-        futures = [executor.submit(one, i) for i in range(count)]
-        for f in as_completed(futures):
-            images.append(f.result())
+    for i in range(count):
+        seed = (int(time.time() * 1000) + i * 100003 + random.randint(0, 9999)) % 2147483647
+        img, ext = _generate_one_image(prompt, seed=seed)
+        images.append((img, ext))
     return images
 
 
