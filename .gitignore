@@ -1,0 +1,14 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+*.log
+images/
+static/images/*
+!static/images/.gitkeep
+prompts/*.txt
+node_modules/
+dist/
+build/
+.next/
+.cache/

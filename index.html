@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Creative Factory</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="static/css/styles.css">
+  <script>
+    (function () {
+      var path = window.location.pathname || "";
+      path = path.replace(/\/index\.html$/i, "").replace(/\/?$/, "") || "";
+      window.API_BASE = (document.documentElement.getAttribute("data-api-base") || path) + "";
+    })();
+  </script>
+</head>
+<body>
+  <div class="app">
+    <div class="layout">
+      <aside class="sidebar">
+        <header class="header">
+          <h1>AI Creative Factory</h1>
+          <p class="subtitle">Generate advertising creatives with AI.</p>
+        </header>
+
+        <section class="panel" id="secIdea">
+          <h2>Idea Input Panel</h2>
+          <textarea id="idea" class="idea-input" placeholder="fitness supplement product advertising" rows="2" aria-label="Enter creative idea"></textarea>
+          <div id="styleRow" class="style-row"></div>
+          <button type="button" id="btnIdeas" class="btn-primary">Generate Ideas</button>
+        </section>
+
+        <section class="panel hidden" id="secIdeas">
+          <h2>Creative Ideas</h2>
+          <p id="selectedIdeaText" class="selected-prompt-text hidden">Select an idea below.</p>
+          <div id="ideasOut"></div>
+        </section>
+
+        <section class="panel hidden" id="secPrompts">
+          <h2>Prompt Selection</h2>
+          <button type="button" id="btnPrompts" class="btn-primary">Generate Prompts</button>
+          <div id="promptsOut"></div>
+        </section>
+
+        <section class="panel hidden" id="secSelected">
+          <h2>Image Generation</h2>
+          <p id="selectedText" class="selected-prompt-text">Select a prompt above.</p>
+          <div class="slider-row">
+            <label for="num">Number of images</label>
+            <input type="range" id="num" min="1" max="4" value="4">
+            <span id="numVal" class="num-val">4</span>
+          </div>
+          <button type="button" id="btnImages" class="btn-primary">Generate Images</button>
+        </section>
+      </aside>
+
+      <div class="main-content">
+        <div class="banner-slot" id="bannerSlot" aria-label="Ad banner">
+          <a class="banner-link" href="https://t.me/shop_3kota_bot" target="_blank" rel="noopener noreferrer">
+            <img src="static/banners/banner.png" alt="Реклама">
+          </a>
+        </div>
+        <div class="gallery-panel">
+          <h2 class="gallery-panel-title">Generated Images</h2>
+          <div id="imagesOut" class="gallery-inner"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="modal" class="modal">
+    <button type="button" id="modalClose" class="close" aria-label="Close">&times;</button>
+    <img id="modalImg" src="" alt="">
+  </div>
+
+  <script src="static/js/script.js"></script>
+</body>
+</html>
