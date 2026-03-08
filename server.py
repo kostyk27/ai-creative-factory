@@ -38,7 +38,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
 OPENAI_CHAT_MODEL = "gpt-4o-mini"
-REPLICATE_MODEL = "black-forest-labs/flux-1.1-pro"
+REPLICATE_MODEL = "black-forest-labs/flux-2-pro"
 
 IMAGE_QUALITY_SUFFIX = (
     "ultra realistic, cinematic lighting, professional advertising photography, "
@@ -254,98 +254,42 @@ def _get_replicate_token():
 
 
 def _generate_one_image(prompt):
-    """Generate one image via Replicate flux-2-pro; return (image_bytes, extension)."""
-    import replicate
-    camera_variations = [
-        "close-up shot",
-        "wide cinematic shot",
-        "smartphone selfie angle",
-        "professional product photography angle",
-        "over-the-shoulder perspective",
-        "macro product shot",
-        "low angle cinematic shot",
-    ]
-    variation = random.choice(camera_variations)
-    scene_boost = (
-        "professional commercial product shoot, advertising campaign photo"
+    import requests
+    token = os.environ.get("REPLICATE_API_TOKEN")
+
+    headers = {
+        "Authorization": f"Token {token}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "version": "black-forest-labs/flux-1.1-pro",
+        "input": {
+            "prompt": prompt,
+            "aspect_ratio": "1:1"
+        }
+    }
+
+    resp = requests.post(
+        "https://api.replicate.com/v1/predictions",
+        json=data,
+        headers=headers,
+        timeout=60
     )
-    enhanced = f"{prompt}, {variation}, {scene_boost}, {IMAGE_QUALITY_SUFFIX}"
 
-    seed = int(time.time() * 1000) % 100000
-    output = replicate.run(
-        REPLICATE_MODEL,
-        input={
-            "prompt": enhanced,
-            "aspect_ratio": "1:1",
-            "seed": seed,
-        },
-    )
-    if output is None:
-        raise ValueError("Replicate returned no output")
-
-    def get_url(obj):
-        """Get URL from object: property .url, method .url(), or string."""
-        if obj is None:
-            return None
-        if isinstance(obj, str):
-            return obj
-        url_attr = getattr(obj, "url", None)
-        if callable(url_attr):
-            return url_attr()
-        if isinstance(url_attr, str):
-            return url_attr
-        return None
-
-    def get_content_from_read(obj):
-        """If obj has .read(), return (content, ext) else None."""
-        if obj is None or not hasattr(obj, "read"):
-            return None
-        try:
-            content = obj.read() if callable(obj.read) else None
-        except Exception:
-            return None
-        if content is None:
-            return None
-        ctype = str(getattr(obj, "content_type", "") or "")
-        ext = "webp" if "webp" in ctype else "png"
-        return content, ext
-
-    # Single FileOutput (flux-2-max etc.): output.url() and output.read() or write(output)
-    direct_read = get_content_from_read(output)
-    if direct_read is not None:
-        return direct_read
-    direct_url = get_url(output)
-    if direct_url:
-        resp = requests.get(direct_url, timeout=60)
-        resp.raise_for_status()
-        content = resp.content
-        content_type = (resp.headers.get("Content-Type") or "").lower()
-        ext = "webp" if "webp" in content_type else "png"
-        return content, ext
-
-    # List or generator of items
-    first = None
-    if hasattr(output, "__iter__") and not isinstance(output, str):
-        try:
-            first = next(iter(output))
-        except StopIteration:
-            first = None
-    else:
-        first = output
-    if first is None:
-        raise ValueError("No image in Replicate response")
-    first_read = get_content_from_read(first)
-    if first_read is not None:
-        return first_read
-    url = get_url(first)
-    if not url:
-        raise ValueError("No image URL in Replicate response")
-    resp = requests.get(url, timeout=60)
     resp.raise_for_status()
-    content = resp.content
-    content_type = (resp.headers.get("Content-Type") or "").lower()
-    ext = "webp" if "webp" in content_type else "png"
-    return content, ext
+    prediction = resp.json()
+
+    get_url = prediction["urls"]["get"]
+
+    while True:
+        result = requests.get(get_url, headers=headers).json()
+        if result["status"] == "succeeded":
+            image_url = result["output"][0]
+            img = requests.get(image_url).content
+            return img, "png"
+        elif result["status"] == "failed":
+            raise ValueError("Replicate generation failed")
 
 
 @app.route("/")
