@@ -285,7 +285,8 @@ def _generate_one_image(prompt):
     while True:
         result = requests.get(get_url, headers=headers).json()
         if result["status"] == "succeeded":
-            image_url = result["output"][0]
+            output = result["output"]
+            image_url = output[0] if isinstance(output, list) else output
             img = requests.get(image_url).content
             return img, "png"
         elif result["status"] == "failed":
