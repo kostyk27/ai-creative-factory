@@ -9,7 +9,9 @@ import json
 import os
 import random
 import re
+import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +30,10 @@ except ImportError:
 
 app = Flask(__name__, static_folder="static")
 ROOT = Path(__file__).resolve().parent
+
+# In-memory job store for async image generation (avoids 502 timeout)
+_generation_jobs = {}
+_jobs_lock = threading.Lock()
 STATIC_DIR = ROOT / "static"
 IMAGES_DIR = STATIC_DIR / "images"
 BANNERS_DIR = STATIC_DIR / "banners"
@@ -363,6 +369,31 @@ def generate_prompts():
     return jsonify({"prompts": scored})
 
 
+def _run_generation_job(job_id, prompt, count):
+    """Background task: generate images and save; update job status."""
+    with _jobs_lock:
+        _generation_jobs[job_id]["status"] = "processing"
+    try:
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        date_folder = datetime.now().strftime("%Y-%m-%d")
+        out_dir = IMAGES_DIR / date_folder
+        out_dir.mkdir(parents=True, exist_ok=True)
+        base_ts = int(time.time())
+        images = _generate_images(prompt, count=count)
+        paths = []
+        for i, (content, ext) in enumerate(images, start=1):
+            name = f"img_{base_ts}_{i}.{ext}"
+            (out_dir / name).write_bytes(content)
+            paths.append(f"/images/{date_folder}/{name}")
+        with _jobs_lock:
+            _generation_jobs[job_id]["status"] = "completed"
+            _generation_jobs[job_id]["images"] = paths
+    except Exception as e:
+        with _jobs_lock:
+            _generation_jobs[job_id]["status"] = "failed"
+            _generation_jobs[job_id]["error"] = str(e)
+
+
 @app.route("/generate-images", methods=["POST"])
 def generate_images():
     token = _get_replicate_token()
@@ -379,24 +410,26 @@ def generate_images():
     if not prompt:
         return jsonify({"error": "prompt is required"}), 400
 
-    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    date_folder = datetime.now().strftime("%Y-%m-%d")
-    out_dir = IMAGES_DIR / date_folder
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    base_ts = int(time.time())
+    job_id = str(uuid.uuid4())
+    with _jobs_lock:
+        _generation_jobs[job_id] = {"status": "processing", "images": [], "error": None}
+    thread = threading.Thread(target=_run_generation_job, args=(job_id, prompt, count))
+    thread.daemon = True
+    thread.start()
+    return jsonify({"job_id": job_id, "status": "processing"}), 202
 
-    try:
-        images = _generate_images(prompt, count=count)
-    except Exception as e:
-        return jsonify({"error": str(e), "images": []}), 500
 
-    for i, (content, ext) in enumerate(images, start=1):
-        name = f"img_{base_ts}_{i}.{ext}"
-        (out_dir / name).write_bytes(content)
-        paths.append(f"/images/{date_folder}/{name}")
-
-    return jsonify({"images": paths})
+@app.route("/generate-images/result/<job_id>", methods=["GET"])
+def generate_images_result(job_id):
+    with _jobs_lock:
+        job = _generation_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify({
+        "status": job["status"],
+        "images": job.get("images", []),
+        "error": job.get("error")
+    })
 
 
 @app.route("/images/<path:filename>")
