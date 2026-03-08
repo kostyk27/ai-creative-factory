@@ -262,11 +262,27 @@ def _generate_one_image(prompt):
         "Content-Type": "application/json"
     }
 
+    enhanced_prompt = f"""
+{prompt},
+
+professional advertising photography,
+commercial product shoot,
+high detail,
+cinematic lighting,
+hyper realistic,
+sharp focus,
+high-end marketing creative,
+social media advertisement,
+photorealistic
+"""
+
     data = {
         "version": "black-forest-labs/flux-1.1-pro",
         "input": {
-            "prompt": prompt,
-            "aspect_ratio": "1:1"
+            "prompt": enhanced_prompt,
+            "aspect_ratio": "1:1",
+            "num_outputs": 4
+            "guidance": 3
         }
     }
 
