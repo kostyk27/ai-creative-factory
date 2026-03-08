@@ -10,6 +10,7 @@ import os
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -253,36 +254,31 @@ def _get_replicate_token():
     return REPLICATE_API_TOKEN or os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
 
-def _generate_one_image(prompt):
+def _generate_one_image(prompt, seed=None):
     import requests
     token = os.environ.get("REPLICATE_API_TOKEN")
+    if not token:
+        raise ValueError("REPLICATE_API_TOKEN is not set")
 
     headers = {
         "Authorization": f"Token {token}",
         "Content-Type": "application/json"
     }
 
-    enhanced_prompt = f"""
-{prompt},
+    # Subject first (Flux best practice), then style/context
+    enhanced_prompt = f"""{prompt}, professional advertising photography, commercial product shoot, high detail, cinematic lighting, hyper realistic, sharp focus, high-end marketing creative, social media advertisement, photorealistic"""
 
-professional advertising photography,
-commercial product shoot,
-high detail,
-cinematic lighting,
-hyper realistic,
-sharp focus,
-high-end marketing creative,
-social media advertisement,
-photorealistic
-"""
+    if seed is None:
+        seed = (int(time.time() * 1000) + random.randint(0, 99999)) % 2147483647
 
     data = {
-        "version": "black-forest-labs/flux-1.1-pro",
+        "version": "black-forest-labs/flux-2-pro",
         "input": {
             "prompt": enhanced_prompt,
             "aspect_ratio": "1:1",
-            "num_outputs": 4,
-            "guidance": 3
+            "seed": seed,
+            "output_format": "webp",
+            "output_quality": 90
         }
     }
 
@@ -292,21 +288,36 @@ photorealistic
         headers=headers,
         timeout=60
     )
-
     resp.raise_for_status()
     prediction = resp.json()
-
     get_url = prediction["urls"]["get"]
 
     while True:
-        result = requests.get(get_url, headers=headers).json()
+        result = requests.get(get_url, headers=headers, timeout=30).json()
         if result["status"] == "succeeded":
             output = result["output"]
             image_url = output[0] if isinstance(output, list) else output
-            img = requests.get(image_url).content
-            return img, "png"
+            img = requests.get(image_url, timeout=60).content
+            return img, "webp"
         elif result["status"] == "failed":
-            raise ValueError("Replicate generation failed")
+            raise ValueError(result.get("error") or "Replicate generation failed")
+        time.sleep(1.5)
+
+
+def _generate_images(prompt, count=4):
+    """Generate count images in parallel (simultaneously)."""
+    def one(i):
+        seed = (int(time.time() * 1000) + i * 100003 + random.randint(0, 9999)) % 2147483647
+        return _generate_one_image(prompt, seed=seed)
+
+    if count <= 0:
+        return []
+    images = []
+    with ThreadPoolExecutor(max_workers=min(count, 4)) as executor:
+        futures = [executor.submit(one, i) for i in range(count)]
+        for f in as_completed(futures):
+            images.append(f.result())
+    return images
 
 
 @app.route("/")
@@ -380,12 +391,13 @@ def generate_images():
     paths = []
     base_ts = int(time.time())
 
-    for i in range(count):
-        try:
-            content, ext = _generate_one_image(prompt)
-        except Exception as e:
-            return jsonify({"error": str(e), "images": paths}), 500
-        name = f"img_{base_ts}_{i + 1}.{ext}"
+    try:
+        images = _generate_images(prompt, count=count)
+    except Exception as e:
+        return jsonify({"error": str(e), "images": []}), 500
+
+    for i, (content, ext) in enumerate(images, start=1):
+        name = f"img_{base_ts}_{i}.{ext}"
         (out_dir / name).write_bytes(content)
         paths.append(f"/images/{date_folder}/{name}")
 
