@@ -281,7 +281,7 @@ photorealistic
         "input": {
             "prompt": enhanced_prompt,
             "aspect_ratio": "1:1",
-            "num_outputs": 4
+            "num_outputs": 4,
             "guidance": 3
         }
     }
