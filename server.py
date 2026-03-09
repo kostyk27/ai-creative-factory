@@ -9,14 +9,20 @@ import json
 import os
 import random
 import re
+import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
 import requests
 from flask import Flask, request, jsonify, send_from_directory
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from openai import OpenAI
 import replicate
+
+os.environ["REPLICATE_API_TOKEN"] = os.environ.get("REPLICATE_API_TOKEN", "")
 
 # Загружаем .env только локально (на хостинге ключи задаются через переменные окружения)
 try:
@@ -27,6 +33,11 @@ except ImportError:
 
 app = Flask(__name__, static_folder="static")
 ROOT = Path(__file__).resolve().parent
+
+# In-memory job store for async image generation (avoids 502 timeout)
+_generation_jobs = {}
+_jobs_lock = threading.Lock()
+limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
 STATIC_DIR = ROOT / "static"
 IMAGES_DIR = STATIC_DIR / "images"
 BANNERS_DIR = STATIC_DIR / "banners"
@@ -53,6 +64,10 @@ STYLE_GUIDES = {
     "influencer": "social media influencer holding product, lifestyle photography",
     "studio": "professional studio lighting, clean product photography",
 }
+
+@app.errorhandler(429)
+def _ratelimit_handler(e):
+    return jsonify({"error": "Вы исчерпали лимит запросов. Пожалуйста, подождите немного"}), 429
 
 
 def _get_client():
@@ -252,37 +267,36 @@ def _get_replicate_token():
     return REPLICATE_API_TOKEN or os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
 
-def _generate_one_image(prompt):
-    """Generate one image via Replicate flux-2-pro; return (image_bytes, extension)."""
-    camera_variations = [
-        "close-up shot",
-        "wide cinematic shot",
-        "smartphone selfie angle",
-        "professional product photography angle",
-        "over-the-shoulder perspective",
-        "macro product shot",
-        "low angle cinematic shot",
-    ]
-    variation = random.choice(camera_variations)
-    scene_boost = (
-        "professional commercial product shoot, advertising campaign photo"
-    )
-    enhanced = f"{prompt}, {variation}, {scene_boost}, {IMAGE_QUALITY_SUFFIX}"
+def _generate_one_image(prompt, seed=None):
+    """Generate one image via Replicate SDK; return (image_bytes, extension)."""
+    token = _get_replicate_token()
+    if not token:
+        raise ValueError("REPLICATE_API_TOKEN is not set")
 
-    seed = int(time.time() * 1000) % 100000
-    output = replicate.run(
+    # Subject-first prompt + centralized quality suffix
+    base = (prompt or "").strip()
+    if not base:
+        raise ValueError("prompt is required")
+    enhanced_prompt = f"{base}, {IMAGE_QUALITY_SUFFIX}"
+
+    if seed is None:
+        seed = (int(time.time() * 1000) + random.randint(0, 99999)) % 2147483647
+
+    client = replicate.Client(api_token=token)
+    output = client.run(
         REPLICATE_MODEL,
         input={
-            "prompt": enhanced,
+            "prompt": enhanced_prompt,
             "aspect_ratio": "1:1",
             "seed": seed,
+            "prompt_upsampling": False,
+            "output_format": "webp",
+            "output_quality": 90,
+            "safety_tolerance": 2,
         },
     )
-    if output is None:
-        raise ValueError("Replicate returned no output")
 
     def get_url(obj):
-        """Get URL from object: property .url, method .url(), or string."""
         if obj is None:
             return None
         if isinstance(obj, str):
@@ -294,56 +308,46 @@ def _generate_one_image(prompt):
             return url_attr
         return None
 
-    def get_content_from_read(obj):
-        """If obj has .read(), return (content, ext) else None."""
-        if obj is None or not hasattr(obj, "read"):
-            return None
-        try:
-            content = obj.read() if callable(obj.read) else None
-        except Exception:
-            return None
-        if content is None:
-            return None
-        ctype = str(getattr(obj, "content_type", "") or "")
-        ext = "webp" if "webp" in ctype else "png"
-        return content, ext
-
-    # Single FileOutput (flux-2-max etc.): output.url() and output.read() or write(output)
-    direct_read = get_content_from_read(output)
-    if direct_read is not None:
-        return direct_read
-    direct_url = get_url(output)
-    if direct_url:
-        resp = requests.get(direct_url, timeout=60)
-        resp.raise_for_status()
-        content = resp.content
-        content_type = (resp.headers.get("Content-Type") or "").lower()
-        ext = "webp" if "webp" in content_type else "png"
-        return content, ext
-
-    # List or generator of items
-    first = None
-    if hasattr(output, "__iter__") and not isinstance(output, str):
-        try:
-            first = next(iter(output))
-        except StopIteration:
-            first = None
+    # Replicate may return a single url, list of urls, or file-like output
+    url = None
+    if isinstance(output, list) and output:
+        url = get_url(output[0])
     else:
-        first = output
-    if first is None:
-        raise ValueError("No image in Replicate response")
-    first_read = get_content_from_read(first)
-    if first_read is not None:
-        return first_read
-    url = get_url(first)
+        url = get_url(output)
     if not url:
-        raise ValueError("No image URL in Replicate response")
+        # Try iterables/generators
+        if hasattr(output, "__iter__") and not isinstance(output, (str, bytes, dict, list)):
+            try:
+                first = next(iter(output))
+                url = get_url(first)
+            except Exception:
+                url = None
+    if not url:
+        raise ValueError("Replicate returned no image URL")
+
     resp = requests.get(url, timeout=60)
     resp.raise_for_status()
-    content = resp.content
-    content_type = (resp.headers.get("Content-Type") or "").lower()
-    ext = "webp" if "webp" in content_type else "png"
-    return content, ext
+    return resp.content, "webp"
+
+
+def _generate_images(prompt, count=4):
+    """Generate images in parallel without blocking the request worker."""
+    if count <= 0:
+        return []
+
+    def one(i):
+        seed = (int(time.time() * 1000) + i * 100003 + random.randint(0, 9999)) % 2147483647
+        return i, _generate_one_image(prompt, seed=seed)
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    results = [None] * count
+    with ThreadPoolExecutor(max_workers=min(count, 4)) as ex:
+        futures = [ex.submit(one, i) for i in range(count)]
+        for f in futures:
+            i, val = f.result()
+            results[i] = val
+    return results
 
 
 @app.route("/")
@@ -352,6 +356,7 @@ def index():
 
 
 @app.route("/generate-ideas", methods=["POST", "OPTIONS"])
+@limiter.limit("5 per minute", methods=["POST"])
 def generate_ideas():
     if request.method == "OPTIONS":
         response = jsonify()
@@ -374,6 +379,7 @@ def generate_ideas():
 
 
 @app.route("/generate-prompts", methods=["POST"])
+@limiter.limit("5 per minute", methods=["POST"])
 def generate_prompts():
     data = request.get_json(silent=True) or {}
     idea = (data.get("idea") or "").strip()
@@ -394,7 +400,51 @@ def generate_prompts():
     return jsonify({"prompts": scored})
 
 
+def _run_generation_job(job_id, prompt, count):
+    """Background task: generate images and save; update job status."""
+    with _jobs_lock:
+        _generation_jobs[job_id]["status"] = "processing"
+    try:
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+        date_folder = datetime.now().strftime("%Y-%m-%d")
+        out_dir = IMAGES_DIR / date_folder
+        out_dir.mkdir(parents=True, exist_ok=True)
+        base_ts = int(time.time())
+        images = _generate_images(prompt, count=count)
+        paths = []
+        for i, (content, ext) in enumerate(images, start=1):
+            name = f"img_{base_ts}_{i}.{ext}"
+            (out_dir / name).write_bytes(content)
+            paths.append(f"/images/{date_folder}/{name}")
+        with _jobs_lock:
+            _generation_jobs[job_id]["status"] = "completed"
+            _generation_jobs[job_id]["images"] = paths
+    except Exception as e:
+        with _jobs_lock:
+            _generation_jobs[job_id]["status"] = "failed"
+            _generation_jobs[job_id]["error"] = str(e)
+
+
+def _prune_jobs(max_age_seconds=3600, max_jobs=200):
+    now = time.time()
+    with _jobs_lock:
+        # remove old jobs
+        to_delete = []
+        for jid, job in _generation_jobs.items():
+            created = job.get("created_at") or now
+            if now - created > max_age_seconds:
+                to_delete.append(jid)
+        for jid in to_delete:
+            _generation_jobs.pop(jid, None)
+        # cap size
+        if len(_generation_jobs) > max_jobs:
+            items = sorted(_generation_jobs.items(), key=lambda kv: (kv[1].get("created_at") or 0))
+            for jid, _ in items[: max(0, len(_generation_jobs) - max_jobs)]:
+                _generation_jobs.pop(jid, None)
+
+
 @app.route("/generate-images", methods=["POST"])
+@limiter.limit("2 per minute", methods=["POST"])
 def generate_images():
     token = _get_replicate_token()
     if not token:
@@ -410,23 +460,33 @@ def generate_images():
     if not prompt:
         return jsonify({"error": "prompt is required"}), 400
 
-    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    date_folder = datetime.now().strftime("%Y-%m-%d")
-    out_dir = IMAGES_DIR / date_folder
-    out_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    base_ts = int(time.time())
+    job_id = str(uuid.uuid4())
+    _prune_jobs()
+    with _jobs_lock:
+        _generation_jobs[job_id] = {
+            "status": "processing",
+            "images": [],
+            "error": None,
+            "created_at": time.time(),
+        }
+    thread = threading.Thread(target=_run_generation_job, args=(job_id, prompt, count))
+    thread.daemon = True
+    thread.start()
+    return jsonify({"job_id": job_id, "status": "processing"}), 202
 
-    for i in range(count):
-        try:
-            content, ext = _generate_one_image(prompt)
-        except Exception as e:
-            return jsonify({"error": str(e), "images": paths}), 500
-        name = f"img_{base_ts}_{i + 1}.{ext}"
-        (out_dir / name).write_bytes(content)
-        paths.append(f"/images/{date_folder}/{name}")
 
-    return jsonify({"images": paths})
+@app.route("/generate-images/result/<job_id>", methods=["GET"])
+@limiter.limit("60 per minute")
+def generate_images_result(job_id):
+    with _jobs_lock:
+        job = _generation_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify({
+        "status": job["status"],
+        "images": job.get("images", []),
+        "error": job.get("error")
+    })
 
 
 @app.route("/images/<path:filename>")

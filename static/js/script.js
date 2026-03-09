@@ -65,6 +65,11 @@
     if (ideasOut) ideasOut.innerHTML = "<p class=\"err\">" + escapeHtml(msg || "Something went wrong.") + "</p>";
   }
 
+  function prettyHttpError(r, data) {
+    if (r && r.status === 429) return "Вы исчерпали лимит запросов. Пожалуйста, подождите немного";
+    return (data && data.error) || (r && r.status) || "Request failed";
+  }
+
   function renderIdeas(ideas) {
     selectedIdea = "";
     if (selectedIdeaText) {
@@ -140,7 +145,7 @@
       });
       var data = await r.json().catch(function () { return {}; });
       if (!r.ok) {
-        showIdeasError(data.error || r.status);
+        showIdeasError(prettyHttpError(r, data));
         btnIdeas.disabled = false;
         return;
       }
@@ -244,7 +249,7 @@
       });
       var data = await r.json().catch(function () { return {}; });
       if (!r.ok) {
-        showPromptsError(data.error || r.status);
+        showPromptsError(prettyHttpError(r, data));
         btnPrompts.disabled = false;
         return;
       }
@@ -323,12 +328,27 @@
     });
   }
 
+  function pollResult(jobId) {
+    return fetch(API_BASE + "/generate-images/result/" + encodeURIComponent(jobId))
+      .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, status: r.status, data: data }; }); })
+      .then(function (res) {
+        var data = res.data;
+        if (!res.ok) throw new Error(prettyHttpError({ status: res.status }, data));
+        if (data.status === "completed") return data.images;
+        if (data.status === "failed") throw new Error(data.error || "Generation failed");
+        return null;
+      });
+  }
+
+  var isGeneratingImages = false;
   btnImages.addEventListener("click", async function () {
     if (!selectedPrompt) {
       showImagesError("Select a prompt first.");
       return;
     }
+    if (isGeneratingImages) return;
     var count = Math.min(4, Math.max(1, parseInt(numEl.value, 10) || 4));
+    isGeneratingImages = true;
     btnImages.disabled = true;
     showImagesLoading();
     try {
@@ -339,15 +359,28 @@
       });
       var data = await r.json().catch(function () { return {}; });
       if (!r.ok) {
-        showImagesError(data.error || r.status);
-        btnImages.disabled = false;
+        showImagesError(prettyHttpError(r, data));
         return;
       }
-      showImages(data.images || []);
+      if (r.status === 202 && data.job_id) {
+        var pollInterval = 2000;
+        while (true) {
+          await new Promise(function (resolve) { setTimeout(resolve, pollInterval); });
+          var result = await pollResult(data.job_id);
+          if (result !== null) {
+            showImages(result);
+            break;
+          }
+        }
+      } else {
+        showImages(data.images || []);
+      }
     } catch (e) {
       showImagesError(e.message || "Request failed");
+    } finally {
+      isGeneratingImages = false;
+      btnImages.disabled = false;
     }
-    btnImages.disabled = false;
   });
 
   buildStyleButtons();

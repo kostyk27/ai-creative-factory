@@ -7,10 +7,15 @@
    - index.html
    - requirements.txt
    - Procfile
+   - gunicorn.conf.py
+   - runtime.txt
    - папка static/ (css, js, banners, images)
    - папка prompts/ (можно пустую)
 
    Не заливать: .env, .git, __pycache__, .DS_Store
+
+   Python 3.14: проект настроен под Python 3.14 (runtime.txt, версии в
+   requirements.txt). Менять не нужно — достаточно залить файлы как есть.
 
 2. КЛЮЧИ API (OpenAI, Replicate)
 
@@ -101,6 +106,20 @@
    Ключи на Timeweb (если нет «Переменных окружения» в панели):
    — По SFTP создайте в корне проекта файл .env (рядом с server.py).
    — Содержимое: OPENAI_API_KEY=sk-... и REPLICATE_API_TOKEN=r8_...
-   — Файл .env не загружайте через публичный репозиторий.
+   —    Файл .env не загружайте через публичный репозиторий.
+
+7. RENDER.COM
+
+   — Важно: в Dashboard сервиса зайдите в Settings → Start Command и укажите
+     команду вручную. Не копируйте строку из Procfile (с «web:») — Render выполнит
+     её целиком и выдаст «web: command not found». Введите ровно:
+
+       python -m gunicorn server:app -c gunicorn.conf.py
+
+   — Порт задаётся в gunicorn.conf.py из переменной PORT (по умолчанию 10000).
+   — В Dashboard → Environment добавьте OPENAI_API_KEY и REPLICATE_API_TOKEN.
+   — Если деплой падает с «Exited with status 1»: откройте логи деплоя (Events → Deploy → логи)
+     и найдите строку с ошибкой Python (ModuleNotFoundError, ImportError и т.п.).
+     Руководство: https://render.com/docs/troubleshooting-deploys
 
 Готово к заливке.

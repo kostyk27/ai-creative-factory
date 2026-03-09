@@ -1,0 +1,8 @@
+# Render Blueprint: команда запуска задаётся здесь, без префикса "web:" из Procfile
+# https://docs.render.com/blueprint-spec
+services:
+  - type: web
+    runtime: python
+    name: creative-factory
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m gunicorn server:app -c gunicorn.conf.py

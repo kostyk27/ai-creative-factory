@@ -1,0 +1,10 @@
+Команда запуска для Render (вставить в Dashboard → Settings → Start Command):
+
+Вариант 1 (через конфиг, порт из переменной PORT):
+python -m gunicorn server:app -c gunicorn.conf.py
+
+Вариант 2 (как предлагает GPT / документация Render):
+python -m gunicorn server:app --bind 0.0.0.0:$PORT
+
+Оба варианта рабочие. Через python -m gunicorn избегаем ошибки «command not found».
+Не копируйте из Procfile строку с «web:» — иначе будет: web: command not found.
