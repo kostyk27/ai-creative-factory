@@ -7,7 +7,6 @@ API keys are server-side only.
 
 import json
 import os
-import random
 import re
 import threading
 import time
@@ -23,7 +22,6 @@ from openai import OpenAI
 
 os.environ["REPLICATE_API_TOKEN"] = os.environ.get("REPLICATE_API_TOKEN", "")
 
-# Загружаем .env только локально (на хостинге ключи задаются через переменные окружения)
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -33,28 +31,18 @@ except ImportError:
 app = Flask(__name__, static_folder="static")
 ROOT = Path(__file__).resolve().parent
 
-# In-memory job store for async image generation (avoids 502 timeout)
 _generation_jobs = {}
 _jobs_lock = threading.Lock()
 limiter = Limiter(get_remote_address, app=app, storage_uri="memory://")
 STATIC_DIR = ROOT / "static"
 IMAGES_DIR = STATIC_DIR / "images"
 BANNERS_DIR = STATIC_DIR / "banners"
-PROMPTS_DIR = ROOT / "prompts"
 
-# Ключи только из переменных окружения (никогда не хранить в коде)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
 OPENAI_CHAT_MODEL = "gpt-4o-mini"
 REPLICATE_MODEL = "black-forest-labs/flux-2-pro"
-
-IMAGE_QUALITY_SUFFIX = (
-    "ultra realistic, cinematic lighting, professional advertising photography, "
-    "high-end product photography, shallow depth of field, dramatic lighting, "
-    "studio lighting, commercial product shoot, 8k realism, "
-    "professional color grading, hyper detailed, sharp focus"
-)
 
 STYLE_GUIDES = {
     "ugc": "authentic smartphone testimonial style, social media ad",
@@ -70,7 +58,6 @@ def _ratelimit_handler(e):
 
 
 def _get_client():
-    """Return OpenAI client. Key must be set."""
     key = OPENAI_API_KEY or os.environ.get("OPENAI_API_KEY", "").strip()
     if not key:
         return None
@@ -251,17 +238,6 @@ def _score_prompts(client, prompts):
         return [{"prompt": p, "score": None} for p in prompts]
 
 
-def _save_prompts(idea, prompt_items):
-    """Append idea and prompts to prompts.txt. prompt_items: list of str or list of { 'prompt': str }."""
-    PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
-    path = PROMPTS_DIR / "prompts.txt"
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(f"\n--- idea: {idea} ---\n")
-        for p in prompt_items:
-            text = p.get("prompt", p) if isinstance(p, dict) else p
-            f.write(text + "\n")
-
-
 def _get_replicate_token():
     return REPLICATE_API_TOKEN or os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
@@ -275,7 +251,18 @@ def _generate_one_image(prompt, seed=None):
     base = (prompt or "").strip()
     if not base:
         raise ValueError("prompt is required")
-    enhanced_prompt = f"{base}, {IMAGE_QUALITY_SUFFIX}"
+    enhanced_prompt = f"""{base},
+
+professional advertising photography,
+commercial product shoot,
+high detail,
+cinematic lighting,
+hyper realistic,
+sharp focus,
+high-end marketing creative,
+social media advertisement,
+photorealistic
+"""
 
     headers = {
         "Authorization": f"Token {token}",
@@ -283,7 +270,7 @@ def _generate_one_image(prompt, seed=None):
     }
 
     if seed is None:
-        seed = (int(time.time() * 1000) + random.randint(0, 99999)) % 2147483647
+        seed = int(time.time() * 1000) % 2147483647
 
     payload = {
         "version": REPLICATE_MODEL,
@@ -335,7 +322,7 @@ def _generate_images(prompt, count=4):
         return []
 
     def one(i):
-        seed = (int(time.time() * 1000) + i * 100003 + random.randint(0, 9999)) % 2147483647
+        seed = (int(time.time() * 1000) + i * 100003) % 2147483647
         return i, _generate_one_image(prompt, seed=seed)
 
     from concurrent.futures import ThreadPoolExecutor
@@ -395,7 +382,6 @@ def generate_prompts():
 
     client = _get_client()
     scored = _score_prompts(client, prompts)
-    _save_prompts(idea, scored)
     return jsonify({"prompts": scored})
 
 
@@ -505,8 +491,6 @@ def catch_all(filename):
 
 if __name__ == "__main__":
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    BANNERS_DIR.mkdir(parents=True, exist_ok=True)
-    PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
     port = int(os.environ.get("PORT", 5000))
     debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
     if debug:
