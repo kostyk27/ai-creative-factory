@@ -20,7 +20,6 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from openai import OpenAI
-import replicate
 
 os.environ["REPLICATE_API_TOKEN"] = os.environ.get("REPLICATE_API_TOKEN", "")
 
@@ -268,66 +267,66 @@ def _get_replicate_token():
 
 
 def _generate_one_image(prompt, seed=None):
-    """Generate one image via Replicate SDK; return (image_bytes, extension)."""
+    """Generate one image via raw Replicate HTTP API; return (image_bytes, extension)."""
     token = _get_replicate_token()
     if not token:
         raise ValueError("REPLICATE_API_TOKEN is not set")
 
-    # Subject-first prompt + centralized quality suffix
     base = (prompt or "").strip()
     if not base:
         raise ValueError("prompt is required")
     enhanced_prompt = f"{base}, {IMAGE_QUALITY_SUFFIX}"
 
+    headers = {
+        "Authorization": f"Token {token}",
+        "Content-Type": "application/json",
+    }
+
     if seed is None:
         seed = (int(time.time() * 1000) + random.randint(0, 99999)) % 2147483647
 
-    client = replicate.Client(api_token=token)
-    output = client.run(
-        REPLICATE_MODEL,
-        input={
+    payload = {
+        "version": REPLICATE_MODEL,
+        "input": {
             "prompt": enhanced_prompt,
             "aspect_ratio": "1:1",
             "seed": seed,
-            "prompt_upsampling": False,
             "output_format": "webp",
             "output_quality": 90,
-            "safety_tolerance": 2,
         },
+    }
+
+    resp = requests.post(
+        "https://api.replicate.com/v1/predictions",
+        headers=headers,
+        json=payload,
+        timeout=60,
     )
-
-    def get_url(obj):
-        if obj is None:
-            return None
-        if isinstance(obj, str):
-            return obj
-        url_attr = getattr(obj, "url", None)
-        if callable(url_attr):
-            return url_attr()
-        if isinstance(url_attr, str):
-            return url_attr
-        return None
-
-    # Replicate may return a single url, list of urls, or file-like output
-    url = None
-    if isinstance(output, list) and output:
-        url = get_url(output[0])
-    else:
-        url = get_url(output)
-    if not url:
-        # Try iterables/generators
-        if hasattr(output, "__iter__") and not isinstance(output, (str, bytes, dict, list)):
-            try:
-                first = next(iter(output))
-                url = get_url(first)
-            except Exception:
-                url = None
-    if not url:
-        raise ValueError("Replicate returned no image URL")
-
-    resp = requests.get(url, timeout=60)
     resp.raise_for_status()
-    return resp.content, "webp"
+    prediction = resp.json()
+    status_url = prediction.get("urls", {}).get("get")
+    if not status_url:
+        raise ValueError("Replicate response missing status URL")
+
+    while True:
+        status_resp = requests.get(status_url, headers=headers, timeout=60)
+        status_resp.raise_for_status()
+        result = status_resp.json()
+        status = result.get("status")
+        if status == "succeeded":
+            output = result.get("output")
+            if isinstance(output, list) and output:
+                image_url = output[0]
+            else:
+                image_url = output
+            if not image_url:
+                raise ValueError("Replicate returned empty output")
+            img_resp = requests.get(image_url, timeout=60)
+            img_resp.raise_for_status()
+            return img_resp.content, "webp"
+        if status == "failed":
+            raise ValueError(result.get("error") or "Replicate generation failed")
+        time.sleep(2)
 
 
 def _generate_images(prompt, count=4):
