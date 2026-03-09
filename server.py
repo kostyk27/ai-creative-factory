@@ -74,9 +74,10 @@ def _generate_creative_ideas(idea):
         "You are an expert creative director for affiliate marketing ads.\n\n"
         f"Product: {idea}\n\n"
         "Generate 10 high-conversion advertising creative ideas for social media ads.\n"
-        "Ideas should describe a visual ad concept.\n\n"
+        "Ideas should describe a visual ad concept.\n"
+        "GENERATE CONCEPTS FOR STATIC IMAGES ONLY. STRICTLY NO VIDEO, NO ANIMATION, NO GIFS, NO REELS.\n\n"
         "Examples:\n"
-        "- influencer testimonial video\n"
+        "- influencer holding the product and smiling\n"
         "- before and after transformation\n"
         "- doctor authority recommendation\n"
         "- luxury product showcase\n\n"
@@ -111,28 +112,27 @@ def _build_prompts(idea, style_prompt=""):
 
     system = (
         "You are an expert in performance marketing and affiliate ad creatives. "
-        "Your task: generate image prompts that STRICTLY match the user's product/idea. "
-        "Every single prompt must clearly feature or describe the user's exact product/idea — no generic or off-topic prompts. "
-        "Reply with exactly 10 image prompts, one per line. No numbering, no bullets, no other text."
+        "Input is an approved creative concept that has ALREADY been selected. "
+        "Your job is to write exact text-to-image prompts for the Flux AI image generator "
+        "to bring THIS EXACT concept to life. Do not invent new concepts. "
+        "Describe the visual layout, subject, and lighting perfectly based on the provided idea. "
+        "Every prompt must stay strictly within the boundaries of the given concept."
     )
     style_line = f"Style: {style_prompt}\n\n" if style_prompt else ""
     user = (
-        "Generate 10 detailed advertising image prompts for performance marketing creatives.\n\n"
-        f"Product/idea: {idea}\n\n"
+        "You will receive an approved creative concept for an advertising image.\n\n"
+        f"Approved concept: {idea}\n\n"
         f"{style_line}"
-        "Each prompt must include:\n"
-        "- subject and product\n"
-        "- environment or scene\n"
-        "- camera angle\n"
-        "- lighting\n"
-        "- advertising style\n"
-        "- emotional tone\n\n"
-        "Prompts should be cinematic, realistic, and optimized for social media ads.\n\n"
-        "Example structure:\n"
-        "fitness influencer holding supplement bottle in gym, smartphone selfie camera angle, "
-        "authentic testimonial vibe, natural lighting, shallow depth of field, "
-        "high-conversion social media advertisement, ultra realistic photography\n\n"
-        "Return 10 prompts. Each prompt should be detailed and around 40–80 words."
+        "Your task:\n"
+        "- Write 10 detailed text-to-image prompts for the Flux image generator.\n"
+        "- Each prompt must be a DIRECT visualization of the approved concept above.\n"
+        "- DO NOT invent new storylines, angles, or products.\n"
+        "- Focus on: subject, product, environment/scene, camera angle, framing, and lighting.\n"
+        "- Optimize for static social media ads (no video, no animation).\n\n"
+        "Important:\n"
+        "- Keep the main idea, character role, and setting exactly as in the approved concept.\n"
+        "- Vary small visual details only (angles, background details, mood), but never change the core idea.\n\n"
+        "Return exactly 10 prompts, one per line. No numbering, no bullets, no extra commentary."
     )
 
     try:
@@ -251,18 +251,7 @@ def _generate_one_image(prompt, seed=None):
     base = (prompt or "").strip()
     if not base:
         raise ValueError("prompt is required")
-    enhanced_prompt = f"""{base},
-
-professional advertising photography,
-commercial product shoot,
-high detail,
-cinematic lighting,
-hyper realistic,
-sharp focus,
-high-end marketing creative,
-social media advertisement,
-photorealistic
-"""
+    enhanced_prompt = f"{base}, highly detailed, professional ad photography"
 
     headers = {
         "Authorization": f"Token {token}",
@@ -283,22 +272,40 @@ photorealistic
         },
     }
 
-    resp = requests.post(
-        "https://api.replicate.com/v1/predictions",
-        headers=headers,
-        json=payload,
-        timeout=60,
-    )
-    resp.raise_for_status()
-    prediction = resp.json()
+    # Create prediction with retry on 429
+    prediction = None
+    for attempt in range(4):
+        resp = requests.post(
+            "https://api.replicate.com/v1/predictions",
+            headers=headers,
+            json=payload,
+            timeout=60,
+        )
+        if resp.status_code == 429 and attempt < 3:
+            time.sleep(3)
+            continue
+        resp.raise_for_status()
+        prediction = resp.json()
+        break
+    if not prediction:
+        raise ValueError("Failed to create prediction on Replicate after retries")
     status_url = prediction.get("urls", {}).get("get")
     if not status_url:
         raise ValueError("Replicate response missing status URL")
 
     while True:
-        status_resp = requests.get(status_url, headers=headers, timeout=60)
-        status_resp.raise_for_status()
-        result = status_resp.json()
+        # Poll prediction status with retry on 429
+        result = None
+        for attempt in range(4):
+            status_resp = requests.get(status_url, headers=headers, timeout=60)
+            if status_resp.status_code == 429 and attempt < 3:
+                time.sleep(3)
+                continue
+            status_resp.raise_for_status()
+            result = status_resp.json()
+            break
+        if result is None:
+            raise ValueError("Failed to poll prediction status after retries")
         status = result.get("status")
         if status == "succeeded":
             output = result.get("output")
