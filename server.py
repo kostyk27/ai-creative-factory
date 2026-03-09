@@ -267,7 +267,6 @@ def _get_replicate_token():
     return REPLICATE_API_TOKEN or os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
 
-<<<<<<< HEAD
 def _generate_one_image(prompt, seed=None):
     """Generate one image via Replicate SDK; return (image_bytes, extension)."""
     token = _get_replicate_token()
@@ -349,62 +348,6 @@ def _generate_images(prompt, count=4):
             i, val = f.result()
             results[i] = val
     return results
-=======
-def _generate_one_image(prompt):
-    import requests
-    token = os.environ.get("REPLICATE_API_TOKEN")
-
-    headers = {
-        "Authorization": f"Token {token}",
-        "Content-Type": "application/json"
-    }
-
-    enhanced_prompt = f"""
-{prompt},
-
-professional advertising photography,
-commercial product shoot,
-high detail,
-cinematic lighting,
-hyper realistic,
-sharp focus,
-high-end marketing creative,
-social media advertisement,
-photorealistic
-"""
-
-    data = {
-        "version": "black-forest-labs/flux-1.1-pro",
-        "input": {
-            "prompt": enhanced_prompt,
-            "aspect_ratio": "1:1",
-            "num_outputs": 4,
-            "guidance": 3
-        }
-    }
-
-    resp = requests.post(
-        "https://api.replicate.com/v1/predictions",
-        json=data,
-        headers=headers,
-        timeout=60
-    )
-
-    resp.raise_for_status()
-    prediction = resp.json()
-
-    get_url = prediction["urls"]["get"]
-
-    while True:
-        result = requests.get(get_url, headers=headers).json()
-        if result["status"] == "succeeded":
-            output = result["output"]
-            image_url = output[0] if isinstance(output, list) else output
-            img = requests.get(image_url).content
-            return img, "png"
-        elif result["status"] == "failed":
-            raise ValueError("Replicate generation failed")
->>>>>>> 86129865d006a99401b24928fbb51b22b6419945
 
 
 @app.route("/")
