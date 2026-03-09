@@ -4,5 +4,8 @@ services:
   - type: web
     runtime: python
     name: creative-factory
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.8
     buildCommand: pip install -r requirements.txt
     startCommand: python -m gunicorn server:app -c gunicorn.conf.py
