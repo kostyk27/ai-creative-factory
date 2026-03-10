@@ -5,12 +5,14 @@ Uses OpenAI for ideas, prompts, scoring. Uses Replicate (flux-2-pro) for image g
 API keys are server-side only.
 """
 
+import base64
 import json
 import os
 import re
 import threading
 import time
 import uuid
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -19,8 +21,6 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from openai import OpenAI
-
-os.environ["REPLICATE_API_TOKEN"] = os.environ.get("REPLICATE_API_TOKEN", "")
 
 try:
     from dotenv import load_dotenv
@@ -39,10 +39,9 @@ IMAGES_DIR = STATIC_DIR / "images"
 BANNERS_DIR = STATIC_DIR / "banners"
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN", "").strip()
 
 OPENAI_CHAT_MODEL = "gpt-4o-mini"
-REPLICATE_MODEL = "black-forest-labs/flux-2-pro"
+OPENAI_IMAGE_MODEL = "gpt-image-1"
 
 STYLE_GUIDES = {
     "ugc": "authentic smartphone testimonial style, social media ad",
@@ -238,89 +237,35 @@ def _score_prompts(client, prompts):
         return [{"prompt": p, "score": None} for p in prompts]
 
 
-def _get_replicate_token():
-    return REPLICATE_API_TOKEN or os.environ.get("REPLICATE_API_TOKEN", "").strip()
-
-
-def _generate_one_image(prompt, seed=None):
-    """Generate one image via raw Replicate HTTP API; return (image_bytes, extension)."""
-    token = _get_replicate_token()
-    if not token:
-        raise ValueError("REPLICATE_API_TOKEN is not set")
+def _generate_one_image(prompt):
+    """Generate one image via OpenAI Image API; return (image_bytes, extension)."""
+    client = _get_client()
+    if not client:
+        raise ValueError("OPENAI_API_KEY is not set")
 
     base = (prompt or "").strip()
     if not base:
         raise ValueError("prompt is required")
-    enhanced_prompt = f"{base}, highly detailed, professional ad photography"
 
-    headers = {
-        "Authorization": f"Token {token}",
-        "Content-Type": "application/json",
-    }
+    camera_variations = [
+        "close-up shot",
+        "wide cinematic shot",
+        "smartphone selfie angle",
+        "professional product photography angle",
+        "macro product shot",
+    ]
+    variation = random.choice(camera_variations)
+    scene_boost = "professional commercial product shoot, advertising campaign photo"
+    enhanced = f"{base}, {variation}, {scene_boost}, highly detailed, professional ad photography"
 
-    if seed is None:
-        seed = int(time.time() * 1000) % 2147483647
-
-    payload = {
-        "version": REPLICATE_MODEL,
-        "input": {
-            "prompt": enhanced_prompt,
-            "aspect_ratio": "1:1",
-            "seed": seed,
-            "output_format": "webp",
-            "output_quality": 90,
-        },
-    }
-
-    # Create prediction with retry on 429
-    prediction = None
-    for attempt in range(4):
-        resp = requests.post(
-            "https://api.replicate.com/v1/predictions",
-            headers=headers,
-            json=payload,
-            timeout=60,
-        )
-        if resp.status_code == 429 and attempt < 3:
-            time.sleep(3)
-            continue
-        resp.raise_for_status()
-        prediction = resp.json()
-        break
-    if not prediction:
-        raise ValueError("Failed to create prediction on Replicate after retries")
-    status_url = prediction.get("urls", {}).get("get")
-    if not status_url:
-        raise ValueError("Replicate response missing status URL")
-
-    while True:
-        # Poll prediction status with retry on 429
-        result = None
-        for attempt in range(4):
-            status_resp = requests.get(status_url, headers=headers, timeout=60)
-            if status_resp.status_code == 429 and attempt < 3:
-                time.sleep(3)
-                continue
-            status_resp.raise_for_status()
-            result = status_resp.json()
-            break
-        if result is None:
-            raise ValueError("Failed to poll prediction status after retries")
-        status = result.get("status")
-        if status == "succeeded":
-            output = result.get("output")
-            if isinstance(output, list) and output:
-                image_url = output[0]
-            else:
-                image_url = output
-            if not image_url:
-                raise ValueError("Replicate returned empty output")
-            img_resp = requests.get(image_url, timeout=60)
-            img_resp.raise_for_status()
-            return img_resp.content, "webp"
-        if status == "failed":
-            raise ValueError(result.get("error") or "Replicate generation failed")
-        time.sleep(2)
+    result = client.images.generate(
+        model=OPENAI_IMAGE_MODEL,
+        prompt=enhanced,
+        size="1024x1024",
+    )
+    image_base64 = result.data[0].b64_json
+    image_bytes = base64.b64decode(image_base64)
+    return image_bytes, "png"
 
 
 def _generate_images(prompt, count=4):
@@ -329,8 +274,7 @@ def _generate_images(prompt, count=4):
         return []
 
     def one(i):
-        seed = (int(time.time() * 1000) + i * 100003) % 2147483647
-        return i, _generate_one_image(prompt, seed=seed)
+        return i, _generate_one_image(prompt)
 
     from concurrent.futures import ThreadPoolExecutor
 
@@ -438,11 +382,6 @@ def _prune_jobs(max_age_seconds=3600, max_jobs=200):
 @app.route("/generate-images", methods=["POST"])
 @limiter.limit("2 per minute", methods=["POST"])
 def generate_images():
-    token = _get_replicate_token()
-    if not token:
-        return jsonify({"error": "REPLICATE_API_TOKEN is not set"}), 500
-    os.environ["REPLICATE_API_TOKEN"] = token
-
     data = request.get_json(silent=True) or {}
     prompt = (data.get("prompt") or "").strip()
     try:
